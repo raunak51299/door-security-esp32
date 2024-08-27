@@ -35,8 +35,6 @@ This project implements a versatile IoT security system using an ESP32 microcont
 - ESPTelnet
 - FreeRTOS
 
-This project demonstrates the integration of various IoT technologies to create a flexible and user-friendly home security solution. It's ideal for hobbyists and developers interested in home automation and IoT security applications.
-
 ## Setup and Configuration
 
 1. Install the required libraries in your Arduino IDE.
