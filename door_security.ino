@@ -1,4 +1,7 @@
 #include <WiFi.h>
+#include <WiFiClientSecure.h>
+#include <UniversalTelegramBot.h>
+#include <ArduinoJson.h>
 #include <HTTPClient.h>
 #include "fauxmoESP.h"
 #include <ArduinoOTA.h>
@@ -13,7 +16,7 @@ const int pirPin = 13;
 const int ledPin = 2;  // Built-in LED pin for ESP32
 
 int motionDetected = 0;
-bool systemActive = false;
+bool systemActive = true;
 
 unsigned long lastBlinkTime = 0;
 unsigned long lastMotionDetectedTime = 0;
@@ -25,8 +28,12 @@ const int WDT_TIMEOUT = 30;
 const char* WIFI_SSID = "";
 const char* WIFI_PASSWORD = "";
 
-const char* PUSHOVER_TOKEN = "";
-const char* PUSHOVER_USER = "";
+
+#define BOT_TOKEN ""
+#define CHAT_ID ""
+
+WiFiClientSecure secured_client;
+UniversalTelegramBot bot(BOT_TOKEN, secured_client);
 
 fauxmoESP fauxmo;
 
@@ -194,6 +201,9 @@ void setup() {
         1,          /* priority of the task */
         &otaTask,   /* Task handle to keep track of created task */
         0);         /* pin task to core 0 */
+
+    // Configure secured client for Telegram
+    secured_client.setCACert(TELEGRAM_CERTIFICATE_ROOT);
 }
 
 void checkMotion() {
@@ -208,7 +218,7 @@ void checkMotion() {
             serialPrintln("At time: " + currentTimeString);
 
             String notificationMessage = "Motion detected! Human presence. Time: " + currentTimeString;
-            sendPushoverNotification(notificationMessage.c_str());
+            sendTelegramMessage(notificationMessage);
         
             blinkCount = 8;  // 4 on-off cycles
         }
@@ -239,44 +249,10 @@ void loop() {
     esp_task_wdt_reset();
 }
 
-void sendPushoverNotification(const char* message) {
-    HTTPClient http;
-    http.begin("https://api.pushover.net/1/messages.json");
-    http.addHeader("Content-Type", "application/x-www-form-urlencoded");
-  
-    String postData = "token=" + String(PUSHOVER_TOKEN) +
-                      "&user=" + String(PUSHOVER_USER) +
-                      "&message=" + urlEncode(message);
-  
-    int httpResponseCode = http.POST(postData);
-  
-    if (httpResponseCode > 0) {
-        serialPrint("Pushover notification sent. Response code: ");
-        serialPrintln(String(httpResponseCode));
+void sendTelegramMessage(const String& message) {
+    if (bot.sendMessage(CHAT_ID, message, "")) {
+        serialPrintln("Telegram message sent successfully");
     } else {
-        serialPrint("Error sending Pushover notification. Error code: ");
-        serialPrintln(String(httpResponseCode));
+        serialPrintln("Failed to send Telegram message");
     }
-  
-    http.end();
-}
-
-String urlEncode(const char* msg) {
-    const char *hex = "0123456789ABCDEF";
-    String encodedMsg = "";
-
-    while (*msg != '\0') {
-        if (('a' <= *msg && *msg <= 'z')
-            || ('A' <= *msg && *msg <= 'Z')
-            || ('0' <= *msg && *msg <= '9')
-            || *msg == '-' || *msg == '_' || *msg == '.' || *msg == '~') {
-            encodedMsg += *msg;
-        } else {
-            encodedMsg += '%';
-            encodedMsg += hex[*msg >> 4];
-            encodedMsg += hex[*msg & 15];
-        }
-        msg++;
-    }
-    return encodedMsg;
 }
