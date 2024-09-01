@@ -28,7 +28,6 @@ const int WDT_TIMEOUT = 30;
 const char* WIFI_SSID = "";
 const char* WIFI_PASSWORD = "";
 
-
 #define BOT_TOKEN ""
 #define CHAT_ID ""
 
@@ -68,6 +67,7 @@ void onTelnetInput(String str) {
         serialPrintln("Security system deactivated");
     } else if (str == "status") {
         serialPrintln("System status: " + String(systemActive ? "Active" : "Inactive"));
+        serialPrintln("Wifi strength: " + String(WiFi.RSSI()) + " dBm");
     } else if (str == "time") {
         serialPrintln("Current time: " + getCurrentTime());
     } else {
@@ -217,7 +217,7 @@ void checkMotion() {
             serialPrintln("Motion detected! Human presence.");
             serialPrintln("At time: " + currentTimeString);
 
-            String notificationMessage = "Motion detected! Human presence. Time: " + currentTimeString;
+            String notificationMessage = "Motion detected! Time: " + currentTimeString;
             sendTelegramMessage(notificationMessage);
         
             blinkCount = 8;  // 4 on-off cycles
