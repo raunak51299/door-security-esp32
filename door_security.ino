@@ -45,7 +45,7 @@ ESPTelnet telnet;
 uint16_t telnetPort = 23;
 
 struct TelegramNotification {
-    char text[128];
+    char text[256];
 };
 
 QueueHandle_t telegramQueue = NULL;
@@ -162,6 +162,9 @@ bool queueTelegramNotification(const String& message) {
     }
 
     TelegramNotification notification = {};
+    if (message.length() >= sizeof(notification.text)) {
+        serialPrintln("Telegram message truncated to fit queue payload");
+    }
     message.substring(0, sizeof(notification.text) - 1).toCharArray(notification.text, sizeof(notification.text));
 
     if (xQueueSend(telegramQueue, &notification, 0) != pdPASS) {
@@ -174,24 +177,35 @@ bool queueTelegramNotification(const String& message) {
 
 void telegramLoop(void * parameter) {
     TelegramNotification notification;
+    bool waitingForWiFi = false;
 
     for (;;) {
-        if (xQueueReceive(telegramQueue, &notification, portMAX_DELAY) == pdPASS) {
+        if (xQueuePeek(telegramQueue, &notification, portMAX_DELAY) == pdPASS) {
+            if (WiFi.status() != WL_CONNECTED) {
+                if (!waitingForWiFi) {
+                    serialPrintln("Telegram delivery paused: WiFi disconnected");
+                    waitingForWiFi = true;
+                }
+                vTaskDelay(pdMS_TO_TICKS(1000));
+                continue;
+            }
+
+            waitingForWiFi = false;
+
+            if (xQueueReceive(telegramQueue, &notification, 0) != pdPASS) {
+                continue;
+            }
+
             bool sent = false;
             int retryCount = 0;
 
             while (!sent && retryCount < maxTelegramSendRetries) {
-                if (WiFi.status() == WL_CONNECTED) {
-                    sent = bot.sendMessage(CHAT_ID, notification.text, "");
-                    if (sent) {
-                        serialPrintln("Telegram message sent successfully");
-                    } else {
-                        retryCount++;
-                        serialPrintln("Failed to send Telegram message, retrying");
-                    }
+                sent = bot.sendMessage(CHAT_ID, notification.text, "");
+                if (sent) {
+                    serialPrintln("Telegram message sent successfully");
                 } else {
                     retryCount++;
-                    serialPrintln("Telegram send delayed: WiFi disconnected");
+                    serialPrintln("Failed to send Telegram message, retrying");
                 }
 
                 if (!sent && retryCount < maxTelegramSendRetries) {
