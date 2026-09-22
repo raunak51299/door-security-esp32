@@ -150,7 +150,6 @@ void ensureWiFiConnection() {
     unsigned long currentTime = millis();
     if (currentTime - lastWiFiReconnectAttempt >= wifiReconnectInterval) {
         serialPrintln("Attempting WiFi reconnection...");
-        WiFi.disconnect();
         WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
         lastWiFiReconnectAttempt = currentTime;
     }
@@ -318,7 +317,14 @@ void setup() {
     });
 
     ArduinoOTA.onProgress([](unsigned int progress, unsigned int total) {
-        Serial.printf("Progress: %u%%\r", total == 0 ? 0 : (progress * 100) / total);
+        unsigned int percent = total == 0 ? 0 : (progress * 100U) / total;
+        static int lastLoggedBucket = -1;
+        int currentBucket = percent / 10;
+
+        if (currentBucket != lastLoggedBucket || percent == 100) {
+            serialPrintln("Progress: " + String(percent) + "%");
+            lastLoggedBucket = currentBucket;
+        }
     });
 
     ArduinoOTA.onError([](ota_error_t error) {
