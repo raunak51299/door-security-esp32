@@ -1,8 +1,6 @@
 #include <WiFi.h>
 #include <WiFiClientSecure.h>
 #include <UniversalTelegramBot.h>
-#include <ArduinoJson.h>
-#include <HTTPClient.h>
 #include "fauxmoESP.h"
 #include <ArduinoOTA.h>
 #include <WiFiClient.h>
@@ -16,14 +14,23 @@ const int pirPin = 13;
 const int ledPin = 2;  // Built-in LED pin for ESP32
 
 int motionDetected = 0;
+int lastMotionState = LOW;
 bool systemActive = true;
 
 unsigned long lastBlinkTime = 0;
 unsigned long lastMotionDetectedTime = 0;
+unsigned long lastWiFiReconnectAttempt = 0;
 int ledState = LOW;
 int blinkCount = 0;
 const unsigned long motionCooldownPeriod = 30000;
+const unsigned long wifiConnectTimeout = 20000;
+const unsigned long wifiReconnectInterval = 10000;
+const unsigned long telegramRetryInterval = 5000;
+const int maxTelegramSendRetries = 3;
 const int WDT_TIMEOUT = 30;
+bool lastWiFiConnected = false;
+int lastOtaProgressBucket = -1;
+bool fauxmoConfigured = false;
 
 const char* WIFI_SSID = "";
 const char* WIFI_PASSWORD = "";
@@ -39,10 +46,25 @@ fauxmoESP fauxmo;
 ESPTelnet telnet;
 uint16_t telnetPort = 23;
 
+struct TelegramNotification {
+    char text[256];
+};
+
+QueueHandle_t telegramQueue = NULL;
+
 const long gmtOffset_sec = 19800;  // IST is UTC+5:30
 const int daylightOffset_sec = 0;
 
 TaskHandle_t otaTask;
+TaskHandle_t telegramTask;
+
+bool hasWiFiCredentials() {
+    return WIFI_SSID[0] != '\0' && WIFI_PASSWORD[0] != '\0';
+}
+
+bool isTelegramConfigured() {
+    return BOT_TOKEN[0] != '\0' && CHAT_ID[0] != '\0';
+}
 
 void serialPrintln(String message) {
     Serial.println(message);
@@ -54,17 +76,182 @@ void serialPrint(String message) {
     telnet.print(message);
 }
 
+void clearAlertState() {
+    blinkCount = 0;
+    ledState = LOW;
+    digitalWrite(ledPin, ledState);
+}
+
+void setSystemActive(bool active) {
+    systemActive = active;
+    lastMotionState = digitalRead(pirPin);
+
+    if (systemActive) {
+        serialPrintln("Security system activated");
+    } else {
+        clearAlertState();
+        serialPrintln("Security system deactivated");
+    }
+}
+
+void syncTimeWithNtp() {
+    configTime(gmtOffset_sec, daylightOffset_sec, "pool.ntp.org");
+}
+
+void startFauxmoControl() {
+    fauxmo.createServer(true);
+    fauxmo.setPort(80);
+
+    if (!fauxmoConfigured) {
+        fauxmo.addDevice("Door Security");
+        fauxmo.onSetState([](unsigned char device_id, const char * device_name, bool state, unsigned char value) {
+            serialPrintln(String("Device #") + int(device_id) + " (" + device_name + ") state: " + (state ? "ON" : "OFF") + " value: " + int(value));
+            setSystemActive(state);
+        });
+        fauxmoConfigured = true;
+    }
+
+    fauxmo.enable(true);
+}
+
+void restartFauxmoControl() {
+    fauxmo.enable(false);
+    startFauxmoControl();
+}
+
+bool connectToWiFi(unsigned long timeoutMs) {
+    if (!hasWiFiCredentials()) {
+        serialPrintln("WiFi credentials missing, continuing in offline mode");
+        return false;
+    }
+
+    WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+
+    unsigned long startTime = millis();
+    while (WiFi.status() != WL_CONNECTED && millis() - startTime < timeoutMs) {
+        delay(1000);
+        serialPrintln("Connecting to WiFi...");
+    }
+
+    if (WiFi.status() == WL_CONNECTED) {
+        serialPrintln("Connected to WiFi");
+        serialPrintln("IP address: " + WiFi.localIP().toString());
+        syncTimeWithNtp();
+        lastWiFiConnected = true;
+        return true;
+    }
+
+    serialPrintln("WiFi connection timed out, continuing in offline mode");
+    lastWiFiConnected = false;
+    lastWiFiReconnectAttempt = millis();
+    return false;
+}
+
+void ensureWiFiConnection() {
+    if (!hasWiFiCredentials()) {
+        return;
+    }
+
+    bool wifiConnected = WiFi.status() == WL_CONNECTED;
+
+    if (wifiConnected) {
+        if (!lastWiFiConnected) {
+            serialPrintln("WiFi reconnected");
+            serialPrintln("IP address: " + WiFi.localIP().toString());
+            syncTimeWithNtp();
+            restartFauxmoControl();
+        }
+
+        lastWiFiConnected = true;
+        return;
+    }
+
+    if (lastWiFiConnected) {
+        serialPrintln("WiFi connection lost");
+        lastWiFiConnected = false;
+    }
+
+    unsigned long currentTime = millis();
+    if (currentTime - lastWiFiReconnectAttempt >= wifiReconnectInterval) {
+        serialPrintln("Attempting WiFi reconnection...");
+        WiFi.reconnect();
+        lastWiFiReconnectAttempt = currentTime;
+    }
+}
+
+bool queueTelegramNotification(const String& message) {
+    if (telegramQueue == NULL || !isTelegramConfigured()) {
+        return false;
+    }
+
+    TelegramNotification notification = {};
+    if (message.length() >= sizeof(notification.text)) {
+        serialPrintln("Telegram message truncated to fit queue payload");
+    }
+    message.substring(0, sizeof(notification.text) - 1).toCharArray(notification.text, sizeof(notification.text));
+
+    if (xQueueSend(telegramQueue, &notification, 0) != pdPASS) {
+        serialPrintln("Notification queue full, dropping Telegram message");
+        return false;
+    }
+
+    return true;
+}
+
+void telegramLoop(void * parameter) {
+    TelegramNotification notification;
+    bool waitingForWiFi = false;
+
+    for (;;) {
+        if (xQueuePeek(telegramQueue, &notification, portMAX_DELAY) == pdPASS) {
+            if (WiFi.status() != WL_CONNECTED) {
+                if (!waitingForWiFi) {
+                    serialPrintln("Telegram delivery paused: WiFi disconnected");
+                    waitingForWiFi = true;
+                }
+                vTaskDelay(pdMS_TO_TICKS(1000));
+                continue;
+            }
+
+            waitingForWiFi = false;
+
+            if (xQueueReceive(telegramQueue, &notification, 0) != pdPASS) {
+                continue;
+            }
+
+            bool sent = false;
+            int retryCount = 0;
+
+            while (!sent && retryCount < maxTelegramSendRetries) {
+                sent = bot.sendMessage(CHAT_ID, notification.text, "");
+                if (sent) {
+                    serialPrintln("Telegram message sent successfully");
+                } else {
+                    retryCount++;
+                    serialPrintln("Failed to send Telegram message, retrying");
+                }
+
+                if (!sent && retryCount < maxTelegramSendRetries) {
+                    vTaskDelay(pdMS_TO_TICKS(telegramRetryInterval));
+                }
+            }
+
+            if (!sent) {
+                serialPrintln("Dropping Telegram message after repeated failures");
+            }
+        }
+    }
+}
+
 void onTelnetInput(String str) {
     str.trim();
-  
+
     serialPrintln("Received command: " + str);
 
     if (str == "activate") {
-        systemActive = true;
-        serialPrintln("Security system activated");
+        setSystemActive(true);
     } else if (str == "deactivate") {
-        systemActive = false;
-        serialPrintln("Security system deactivated");
+        setSystemActive(false);
     } else if (str == "status") {
         serialPrintln("System status: " + String(systemActive ? "Active" : "Inactive"));
         serialPrintln("Wifi strength: " + String(WiFi.RSSI()) + " dBm");
@@ -121,20 +308,13 @@ void setup() {
     Serial.begin(115200);
     pinMode(pirPin, INPUT);
     pinMode(ledPin, OUTPUT);
-  
-    serialPrintln("PIR Motion Sensor initializing...");
-    delay(2000); 
-    serialPrintln("PIR Motion Sensor ready!");
-  
-    WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
-    while (WiFi.status() != WL_CONNECTED) {
-        delay(1000);
-        serialPrintln("Connecting to WiFi...");
-    }
-    serialPrintln("Connected to WiFi");
-    serialPrintln("IP address: " + WiFi.localIP().toString());
+    lastMotionState = digitalRead(pirPin);
 
-    configTime(gmtOffset_sec, daylightOffset_sec, "pool.ntp.org");
+    serialPrintln("PIR Motion Sensor initializing...");
+    delay(2000);
+    serialPrintln("PIR Motion Sensor ready!");
+
+    connectToWiFi(wifiConnectTimeout);
 
     esp_task_wdt_config_t wdt_config = {
         .timeout_ms = WDT_TIMEOUT * 1000,
@@ -153,17 +333,24 @@ void setup() {
             type = "sketch";
         else
             type = "filesystem";
+        lastOtaProgressBucket = -1;
         serialPrintln("Start updating " + type);
     });
-  
+
     ArduinoOTA.onEnd([]() {
         serialPrintln("\nEnd");
     });
-  
+
     ArduinoOTA.onProgress([](unsigned int progress, unsigned int total) {
-        Serial.printf("Progress: %u%%\r", (progress / (total / 100)));
+        unsigned int percent = total == 0 ? 0 : (progress * 100U) / total;
+        int currentBucket = percent / 10;
+
+        if (currentBucket != lastOtaProgressBucket || percent == 100) {
+            serialPrintln("Progress: " + String(percent) + "%");
+            lastOtaProgressBucket = currentBucket;
+        }
     });
-  
+
     ArduinoOTA.onError([](ota_error_t error) {
         Serial.printf("Error[%u]: ", error);
         if (error == OTA_AUTH_ERROR) serialPrintln("Auth Failed");
@@ -175,23 +362,22 @@ void setup() {
 
     ArduinoOTA.begin();
 
-    fauxmo.createServer(true);
-    fauxmo.setPort(80);
-    fauxmo.enable(true);
-
-    fauxmo.addDevice("Door Security");
-
-    fauxmo.onSetState([](unsigned char device_id, const char * device_name, bool state, unsigned char value) {
-        serialPrintln(String("Device #") + device_id + " (" + device_name + ") state: " + (state ? "ON" : "OFF") + " value: " + value);
-        systemActive = state;
-        if (systemActive) {
-            serialPrintln("Security system activated");
-        } else {
-            serialPrintln("Security system deactivated");
-        }
-    });
+    startFauxmoControl();
 
     setupTelnet();
+
+    if (isTelegramConfigured()) {
+        secured_client.setCACert(TELEGRAM_CERTIFICATE_ROOT);
+        if (!hasWiFiCredentials()) {
+            serialPrintln("Telegram notifications waiting for WiFi credentials");
+        }
+        telegramQueue = xQueueCreate(5, sizeof(TelegramNotification));
+        if (telegramQueue == NULL) {
+            serialPrintln("Failed to create Telegram notification queue");
+        }
+    } else {
+        serialPrintln("Telegram notifications disabled: missing BOT_TOKEN or CHAT_ID");
+    }
 
     xTaskCreatePinnedToCore(
         otaLoop,    /* Task function. */
@@ -202,14 +388,22 @@ void setup() {
         &otaTask,   /* Task handle to keep track of created task */
         0);         /* pin task to core 0 */
 
-    // Configure secured client for Telegram
-    secured_client.setCACert(TELEGRAM_CERTIFICATE_ROOT);
+    if (telegramQueue != NULL) {
+        xTaskCreatePinnedToCore(
+            telegramLoop,
+            "Telegram",
+            10000,
+            NULL,
+            1,
+            &telegramTask,
+            1);
+    }
 }
 
 void checkMotion() {
     motionDetected = digitalRead(pirPin);
-    
-    if (motionDetected == HIGH) {
+
+    if (motionDetected == HIGH && lastMotionState == LOW) {
         unsigned long currentTime = millis();
         if (currentTime - lastMotionDetectedTime > motionCooldownPeriod) {
             lastMotionDetectedTime = currentTime;
@@ -218,41 +412,38 @@ void checkMotion() {
             serialPrintln("At time: " + currentTimeString);
 
             String notificationMessage = "Motion detected! Time: " + currentTimeString;
-            sendTelegramMessage(notificationMessage);
-        
+            if (isTelegramConfigured() && !queueTelegramNotification(notificationMessage)) {
+                serialPrintln("Failed to queue Telegram message");
+            }
+
             blinkCount = 8;  // 4 on-off cycles
         }
     }
+
+    lastMotionState = motionDetected;
 }
 
 void loop() {
     unsigned long currentTime = millis();
+    ensureWiFiConnection();
     fauxmo.handle();
     telnet.loop();
-    
+
     if (systemActive) {
         checkMotion();
-        
+
         if (blinkCount > 0) {
             if (currentTime - lastBlinkTime >= 250) {
                 lastBlinkTime = currentTime;
                 ledState = !ledState;
                 digitalWrite(ledPin, ledState);
-                
+
                 if (ledState == LOW) {
                     blinkCount--;
                 }
             }
         }
     }
-    
-    esp_task_wdt_reset();
-}
 
-void sendTelegramMessage(const String& message) {
-    if (bot.sendMessage(CHAT_ID, message, "")) {
-        serialPrintln("Telegram message sent successfully");
-    } else {
-        serialPrintln("Failed to send Telegram message");
-    }
+    esp_task_wdt_reset();
 }
