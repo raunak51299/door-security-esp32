@@ -155,7 +155,7 @@ void ensureWiFiConnection() {
     unsigned long currentTime = millis();
     if (currentTime - lastWiFiReconnectAttempt >= wifiReconnectInterval) {
         serialPrintln("Attempting WiFi reconnection...");
-        WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+        WiFi.reconnect();
         lastWiFiReconnectAttempt = currentTime;
     }
 }
