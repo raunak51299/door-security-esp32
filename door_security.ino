@@ -356,10 +356,8 @@ void setup() {
 
     setupTelnet();
 
-    // Configure secured client for Telegram
-    secured_client.setCACert(TELEGRAM_CERTIFICATE_ROOT);
-
     if (isTelegramEnabled()) {
+        secured_client.setCACert(TELEGRAM_CERTIFICATE_ROOT);
         telegramQueue = xQueueCreate(5, sizeof(TelegramNotification));
         if (telegramQueue == NULL) {
             serialPrintln("Failed to create Telegram notification queue");
