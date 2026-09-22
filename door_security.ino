@@ -112,6 +112,9 @@ bool connectToWiFi(unsigned long timeoutMs) {
     unsigned long startTime = millis();
     while (WiFi.status() != WL_CONNECTED && millis() - startTime < timeoutMs) {
         delay(1000);
+        if (esp_task_wdt_status(NULL) == ESP_OK) {
+            esp_task_wdt_reset();
+        }
         serialPrintln("Connecting to WiFi...");
     }
 
@@ -356,14 +359,15 @@ void setup() {
 
     setupTelnet();
 
-    if (isTelegramEnabled()) {
+    if (isTelegramConfigured()) {
         secured_client.setCACert(TELEGRAM_CERTIFICATE_ROOT);
+        if (!hasWiFiCredentials()) {
+            serialPrintln("Telegram notifications waiting for WiFi credentials");
+        }
         telegramQueue = xQueueCreate(5, sizeof(TelegramNotification));
         if (telegramQueue == NULL) {
             serialPrintln("Failed to create Telegram notification queue");
         }
-    } else if (isTelegramConfigured()) {
-        serialPrintln("Telegram notifications disabled: missing WiFi credentials");
     } else {
         serialPrintln("Telegram notifications disabled: missing BOT_TOKEN or CHAT_ID");
     }
