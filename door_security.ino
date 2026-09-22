@@ -200,7 +200,7 @@ void telegramLoop(void * parameter) {
 
 void onTelnetInput(String str) {
     str.trim();
-  
+
     serialPrintln("Received command: " + str);
 
     if (str == "activate") {
@@ -264,9 +264,9 @@ void setup() {
     pinMode(pirPin, INPUT);
     pinMode(ledPin, OUTPUT);
     lastMotionState = digitalRead(pirPin);
-  
+
     serialPrintln("PIR Motion Sensor initializing...");
-    delay(2000); 
+    delay(2000);
     serialPrintln("PIR Motion Sensor ready!");
 
     connectToWiFi(wifiConnectTimeout);
@@ -290,15 +290,15 @@ void setup() {
             type = "filesystem";
         serialPrintln("Start updating " + type);
     });
-  
+
     ArduinoOTA.onEnd([]() {
         serialPrintln("\nEnd");
     });
-  
+
     ArduinoOTA.onProgress([](unsigned int progress, unsigned int total) {
         Serial.printf("Progress: %u%%\r", (progress / (total / 100)));
     });
-  
+
     ArduinoOTA.onError([](ota_error_t error) {
         Serial.printf("Error[%u]: ", error);
         if (error == OTA_AUTH_ERROR) serialPrintln("Auth Failed");
@@ -350,14 +350,14 @@ void setup() {
             1,
             &telegramTask,
             1);
-    } else {
+    } else if (isTelegramConfigured()) {
         serialPrintln("Failed to create Telegram notification queue");
     }
 }
 
 void checkMotion() {
     motionDetected = digitalRead(pirPin);
-    
+
     if (motionDetected == HIGH && lastMotionState == LOW) {
         unsigned long currentTime = millis();
         if (currentTime - lastMotionDetectedTime > motionCooldownPeriod) {
@@ -367,10 +367,10 @@ void checkMotion() {
             serialPrintln("At time: " + currentTimeString);
 
             String notificationMessage = "Motion detected! Time: " + currentTimeString;
-            if (!queueTelegramNotification(notificationMessage)) {
+            if (isTelegramConfigured() && !queueTelegramNotification(notificationMessage)) {
                 serialPrintln("Failed to queue Telegram message");
             }
-        
+
             blinkCount = 8;  // 4 on-off cycles
         }
     }
@@ -383,22 +383,22 @@ void loop() {
     ensureWiFiConnection();
     fauxmo.handle();
     telnet.loop();
-    
+
     if (systemActive) {
         checkMotion();
-        
+
         if (blinkCount > 0) {
             if (currentTime - lastBlinkTime >= 250) {
                 lastBlinkTime = currentTime;
                 ledState = !ledState;
                 digitalWrite(ledPin, ledState);
-                
+
                 if (ledState == LOW) {
                     blinkCount--;
                 }
             }
         }
     }
-    
+
     esp_task_wdt_reset();
 }
