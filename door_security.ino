@@ -30,6 +30,7 @@ const int maxTelegramSendRetries = 3;
 const int WDT_TIMEOUT = 30;
 bool lastWiFiConnected = false;
 int lastOtaProgressBucket = -1;
+bool fauxmoConfigured = false;
 
 const char* WIFI_SSID = "";
 const char* WIFI_PASSWORD = "";
@@ -97,6 +98,27 @@ void syncTimeWithNtp() {
     configTime(gmtOffset_sec, daylightOffset_sec, "pool.ntp.org");
 }
 
+void startFauxmoControl() {
+    fauxmo.createServer(true);
+    fauxmo.setPort(80);
+
+    if (!fauxmoConfigured) {
+        fauxmo.addDevice("Door Security");
+        fauxmo.onSetState([](unsigned char device_id, const char * device_name, bool state, unsigned char value) {
+            serialPrintln(String("Device #") + int(device_id) + " (" + device_name + ") state: " + (state ? "ON" : "OFF") + " value: " + int(value));
+            setSystemActive(state);
+        });
+        fauxmoConfigured = true;
+    }
+
+    fauxmo.enable(true);
+}
+
+void restartFauxmoControl() {
+    fauxmo.enable(false);
+    startFauxmoControl();
+}
+
 bool connectToWiFi(unsigned long timeoutMs) {
     if (!hasWiFiCredentials()) {
         serialPrintln("WiFi credentials missing, continuing in offline mode");
@@ -137,6 +159,7 @@ void ensureWiFiConnection() {
             serialPrintln("WiFi reconnected");
             serialPrintln("IP address: " + WiFi.localIP().toString());
             syncTimeWithNtp();
+            restartFauxmoControl();
         }
 
         lastWiFiConnected = true;
@@ -339,16 +362,7 @@ void setup() {
 
     ArduinoOTA.begin();
 
-    fauxmo.createServer(true);
-    fauxmo.setPort(80);
-    fauxmo.enable(true);
-
-    fauxmo.addDevice("Door Security");
-
-    fauxmo.onSetState([](unsigned char device_id, const char * device_name, bool state, unsigned char value) {
-        serialPrintln(String("Device #") + int(device_id) + " (" + device_name + ") state: " + (state ? "ON" : "OFF") + " value: " + int(value));
-        setSystemActive(state);
-    });
+    startFauxmoControl();
 
     setupTelnet();
 
