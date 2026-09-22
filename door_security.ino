@@ -350,6 +350,9 @@ void setup() {
 
     if (isTelegramConfigured()) {
         telegramQueue = xQueueCreate(5, sizeof(TelegramNotification));
+        if (telegramQueue == NULL) {
+            serialPrintln("Failed to create Telegram notification queue");
+        }
     } else {
         serialPrintln("Telegram notifications disabled: missing BOT_TOKEN or CHAT_ID");
     }
@@ -372,8 +375,6 @@ void setup() {
             1,
             &telegramTask,
             1);
-    } else if (isTelegramConfigured()) {
-        serialPrintln("Failed to create Telegram notification queue");
     }
 }
 
