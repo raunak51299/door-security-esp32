@@ -65,10 +65,6 @@ bool isTelegramConfigured() {
     return BOT_TOKEN[0] != '\0' && CHAT_ID[0] != '\0';
 }
 
-bool isTelegramEnabled() {
-    return isTelegramConfigured() && hasWiFiCredentials();
-}
-
 void serialPrintln(String message) {
     Serial.println(message);
     telnet.println(message);
@@ -112,9 +108,6 @@ bool connectToWiFi(unsigned long timeoutMs) {
     unsigned long startTime = millis();
     while (WiFi.status() != WL_CONNECTED && millis() - startTime < timeoutMs) {
         delay(1000);
-        if (esp_task_wdt_status(NULL) == ESP_OK) {
-            esp_task_wdt_reset();
-        }
         serialPrintln("Connecting to WiFi...");
     }
 
@@ -164,7 +157,7 @@ void ensureWiFiConnection() {
 }
 
 bool queueTelegramNotification(const String& message) {
-    if (telegramQueue == NULL || !isTelegramEnabled()) {
+    if (telegramQueue == NULL || !isTelegramConfigured()) {
         return false;
     }
 
@@ -353,7 +346,7 @@ void setup() {
     fauxmo.addDevice("Door Security");
 
     fauxmo.onSetState([](unsigned char device_id, const char * device_name, bool state, unsigned char value) {
-        serialPrintln(String("Device #") + device_id + " (" + device_name + ") state: " + (state ? "ON" : "OFF") + " value: " + value);
+        serialPrintln(String("Device #") + int(device_id) + " (" + device_name + ") state: " + (state ? "ON" : "OFF") + " value: " + int(value));
         setSystemActive(state);
     });
 
@@ -405,7 +398,7 @@ void checkMotion() {
             serialPrintln("At time: " + currentTimeString);
 
             String notificationMessage = "Motion detected! Time: " + currentTimeString;
-            if (isTelegramEnabled() && !queueTelegramNotification(notificationMessage)) {
+            if (isTelegramConfigured() && !queueTelegramNotification(notificationMessage)) {
                 serialPrintln("Failed to queue Telegram message");
             }
 
