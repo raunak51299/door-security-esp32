@@ -26,6 +26,7 @@ const unsigned long motionCooldownPeriod = 30000;
 const unsigned long wifiConnectTimeout = 20000;
 const unsigned long wifiReconnectInterval = 10000;
 const unsigned long telegramRetryInterval = 5000;
+const int maxTelegramSendRetries = 3;
 const int WDT_TIMEOUT = 30;
 bool lastWiFiConnected = false;
 
@@ -177,22 +178,29 @@ void telegramLoop(void * parameter) {
     for (;;) {
         if (xQueueReceive(telegramQueue, &notification, portMAX_DELAY) == pdPASS) {
             bool sent = false;
+            int retryCount = 0;
 
-            while (!sent) {
+            while (!sent && retryCount < maxTelegramSendRetries) {
                 if (WiFi.status() == WL_CONNECTED) {
                     sent = bot.sendMessage(CHAT_ID, notification.text, "");
                     if (sent) {
                         serialPrintln("Telegram message sent successfully");
                     } else {
+                        retryCount++;
                         serialPrintln("Failed to send Telegram message, retrying");
                     }
                 } else {
+                    retryCount++;
                     serialPrintln("Telegram send delayed: WiFi disconnected");
                 }
 
-                if (!sent) {
+                if (!sent && retryCount < maxTelegramSendRetries) {
                     vTaskDelay(pdMS_TO_TICKS(telegramRetryInterval));
                 }
+            }
+
+            if (!sent) {
+                serialPrintln("Dropping Telegram message after repeated failures");
             }
         }
     }
@@ -296,7 +304,7 @@ void setup() {
     });
 
     ArduinoOTA.onProgress([](unsigned int progress, unsigned int total) {
-        Serial.printf("Progress: %u%%\r", (progress / (total / 100)));
+        Serial.printf("Progress: %u%%\r", total == 0 ? 0 : (progress * 100) / total);
     });
 
     ArduinoOTA.onError([](ota_error_t error) {
