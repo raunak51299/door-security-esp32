@@ -29,6 +29,7 @@ const unsigned long telegramRetryInterval = 5000;
 const int maxTelegramSendRetries = 3;
 const int WDT_TIMEOUT = 30;
 bool lastWiFiConnected = false;
+int lastOtaProgressBucket = -1;
 
 const char* WIFI_SSID = "";
 const char* WIFI_PASSWORD = "";
@@ -62,6 +63,10 @@ bool hasWiFiCredentials() {
 
 bool isTelegramConfigured() {
     return BOT_TOKEN[0] != '\0' && CHAT_ID[0] != '\0';
+}
+
+bool isTelegramEnabled() {
+    return isTelegramConfigured() && hasWiFiCredentials();
 }
 
 void serialPrintln(String message) {
@@ -156,7 +161,7 @@ void ensureWiFiConnection() {
 }
 
 bool queueTelegramNotification(const String& message) {
-    if (telegramQueue == NULL || !isTelegramConfigured()) {
+    if (telegramQueue == NULL || !isTelegramEnabled()) {
         return false;
     }
 
@@ -309,6 +314,7 @@ void setup() {
             type = "sketch";
         else
             type = "filesystem";
+        lastOtaProgressBucket = -1;
         serialPrintln("Start updating " + type);
     });
 
@@ -318,12 +324,11 @@ void setup() {
 
     ArduinoOTA.onProgress([](unsigned int progress, unsigned int total) {
         unsigned int percent = total == 0 ? 0 : (progress * 100U) / total;
-        static int lastLoggedBucket = -1;
         int currentBucket = percent / 10;
 
-        if (currentBucket != lastLoggedBucket || percent == 100) {
+        if (currentBucket != lastOtaProgressBucket || percent == 100) {
             serialPrintln("Progress: " + String(percent) + "%");
-            lastLoggedBucket = currentBucket;
+            lastOtaProgressBucket = currentBucket;
         }
     });
 
@@ -354,11 +359,13 @@ void setup() {
     // Configure secured client for Telegram
     secured_client.setCACert(TELEGRAM_CERTIFICATE_ROOT);
 
-    if (isTelegramConfigured()) {
+    if (isTelegramEnabled()) {
         telegramQueue = xQueueCreate(5, sizeof(TelegramNotification));
         if (telegramQueue == NULL) {
             serialPrintln("Failed to create Telegram notification queue");
         }
+    } else if (isTelegramConfigured()) {
+        serialPrintln("Telegram notifications disabled: missing WiFi credentials");
     } else {
         serialPrintln("Telegram notifications disabled: missing BOT_TOKEN or CHAT_ID");
     }
@@ -396,7 +403,7 @@ void checkMotion() {
             serialPrintln("At time: " + currentTimeString);
 
             String notificationMessage = "Motion detected! Time: " + currentTimeString;
-            if (isTelegramConfigured() && !queueTelegramNotification(notificationMessage)) {
+            if (isTelegramEnabled() && !queueTelegramNotification(notificationMessage)) {
                 serialPrintln("Failed to queue Telegram message");
             }
 
